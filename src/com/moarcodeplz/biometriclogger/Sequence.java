@@ -1,5 +1,7 @@
 package com.moarcodeplz.biometriclogger;
 
+import java.util.Random;
+
 import android.graphics.Color;
 import android.text.SpannableString;
 import android.text.style.BackgroundColorSpan;
@@ -38,6 +40,7 @@ public class Sequence {
 	public boolean isComplete() {
 		
 		return index >= text.length();
+		
 	}
 	
 	
@@ -50,6 +53,21 @@ public class Sequence {
 	public String getText() {
 		
 		return text;
+		
+	}
+	
+	public static Sequence getRandomSequenceOfLength(int inputLength) {
+	
+		String seqContents = "";
+		Random r = new Random();
+		
+		for (int i=0; i<inputLength; i++) {
+		
+			seqContents += r.nextInt(10);
+			
+		}
+		
+		return new Sequence(seqContents);
 		
 	}
 	

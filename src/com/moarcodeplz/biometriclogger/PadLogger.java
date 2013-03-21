@@ -1,17 +1,22 @@
 package com.moarcodeplz.biometriclogger;
 
+import java.io.File;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Collections;
+import java.util.List;
 import java.util.Random;
 
 import android.media.AudioManager;
-import android.media.MediaPlayer;
-import android.media.MediaPlayer.OnCompletionListener;
 import android.media.SoundPool;
 import android.os.Bundle;
 import android.app.Activity;
+import android.content.Context;
 import android.graphics.Color;
-import android.graphics.Point;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.util.Log;
 import android.util.SparseIntArray;
 import android.view.Display;
 import android.view.Gravity;
@@ -25,27 +30,36 @@ import android.widget.Button;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
 
-public class PadLogger extends Activity implements OnTouchListener {
+public class PadLogger extends Activity implements OnTouchListener, SensorEventListener {
 
-	RelativeLayout rootLayout;
-	ArrayList<Button> buttons;
-	TextView topView;
+	private RelativeLayout rootLayout;
+	private ArrayList<Button> buttons;
+	private TextView topView;
 	
 	private final float topPortion = 0.2f;
 	private int hMargin, vMargin, buttonHeight, buttonWidth, screenHeight;
-	private int sequenceNumber = 0;
-	Sequence curSequence;
+	private Sequence curSequence;
 	private SoundPool sp;
 	private SparseIntArray soundMap;
+	private ArrayList<BioEvent> loggedEvents;
+	private SparseIntArray sensorMap;
+	private StringBuilder sensorBuilder;
+	private UploadRestClient httpClient;
 	
 	private final int BACKGROUND_COLOR = Color.LTGRAY;
 	private final int BUTTON_UP_COLOR = Color.parseColor("#33B5E5");
 	private final int BUTTON_DOWN_COLOR = Color.parseColor("#0099CC");
+	private final int LOG_SPEED = SensorManager.SENSOR_DELAY_FASTEST;
+	
+	public static ArrayList<String> filesToOffload;
 	
     @Override
     public void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
     	
+        super.onCreate(savedInstanceState);
+        PadLogger.filesToOffload = new ArrayList<String>();
+        initializeOffloadList();
+        
     	//Remove title bar
     	requestWindowFeature(Window.FEATURE_NO_TITLE);
     	//Remove notification bar
@@ -60,17 +74,71 @@ public class PadLogger extends Activity implements OnTouchListener {
         soundMap.put(2, sp.load(this, R.raw.woohoo, 1));
         soundMap.put(3, sp.load(this, R.raw.tada, 1));
         soundMap.put(4, sp.load(this, R.raw.no, 1));
-        soundMap.put(5, sp.load(this, R.raw.scratch, 1));
+        loggedEvents = new ArrayList<BioEvent>();
+        loggedEvents.add(new BioEvent("ONCREATE"));
+        intializeSensorMap();
+        sensorBuilder = new StringBuilder();
+        httpClient = new UploadRestClient();
         
         findViewById(R.id.rootLayout).getRootView().setBackgroundColor(BACKGROUND_COLOR);
         setNextSequence();
         populateScreen();
+        registerSensorListeners();
         
     }
     
+    @Override
+    public void onStop() {
+    	
+    	unregisterSensorListeners();
+    	android.os.Process.killProcess(android.os.Process.myPid());
+    	
+    }
+    
+    private void initializeOffloadList() {
+    
+    	//TODO fill this out
+    	
+    }
+    
+    private void registerSensorListeners() {
+		
+		SensorManager sm = (SensorManager) getSystemService(SENSOR_SERVICE);
+		
+		for (Sensor curSensor : sm.getSensorList(Sensor.TYPE_ALL)) {
+			sm.registerListener(this, curSensor, LOG_SPEED);
+		}
+    	
+    }
+    
+    private void unregisterSensorListeners() {
+
+		SensorManager sm = (SensorManager) getSystemService(SENSOR_SERVICE);
+		sm.unregisterListener(this);
+		
+    }
+    
+    private void intializeSensorMap() {
+		
+		ArrayList<Sensor> sensors = new ArrayList<Sensor>(getAllSensors());
+		Collections.sort(sensors, new SensorComparator());
+		sensorMap = new SparseIntArray(sensors.size());
+		for (int i=0; i<sensors.size(); i++) {
+			sensorMap.put(sensors.get(i).getName().hashCode(), i);
+		}
+    	
+    }
+	
+	private List<Sensor> getAllSensors() {
+		
+		SensorManager sm = (SensorManager) getSystemService(Context.SENSOR_SERVICE);
+		return sm.getSensorList(Sensor.TYPE_ALL);
+		
+	}
+    
     private void setNextSequence() {
-    	curSequence = new Sequence(Globals.SEQUENCES[sequenceNumber]);
-    	sequenceNumber = (sequenceNumber + 1) % Globals.SEQUENCES.length;
+    	curSequence = Sequence.getRandomSequenceOfLength(9);
+    	loggedEvents.add(new BioEvent("NEW_SEQUENCE " + curSequence.getText()));
     }
     
     @SuppressWarnings("deprecation")
@@ -139,21 +207,31 @@ public class PadLogger extends Activity implements OnTouchListener {
 		
 		switch(motion.getAction()) {
 			case MotionEvent.ACTION_DOWN:
+				loggedEvents.add(new BioEvent("BUTTON_DOWN " + clickedButton.getText().toString()));
 				clickedButton.setBackgroundColor(BUTTON_DOWN_COLOR);
 				break;
 			case MotionEvent.ACTION_UP:
 				clickedButton.setBackgroundColor(BUTTON_UP_COLOR);
 				clickedText = (String) clickedButton.getText();
+				loggedEvents.add(new BioEvent("BUTTON_UP " + clickedButton.getText().toString()));
 				if (curSequence.checkNext(clickedText.charAt(0))) {
 					curSequence.consumeNext();
 					if (curSequence.isComplete()) {
-						//TODO go to other sequence or something
+						loggedEvents.add(new BioEvent("SEQUENCE_COMPLETE"));
+						createLogFile();
+						if (StorageHelper.isNetworkAvailable(this)) {
+							Log.d("PadLogger", "Networking is available!");
+							httpClient.startOffloadIfNotRunning();
+						} else {
+							Log.d("PadLogger", "Networking is NOT available!");
+						}
 						playSuccessSound();
 						setNextSequence();
 					} else {
 						playChime();
 					}
 				} else {
+					loggedEvents.add(new BioEvent("SEQUENCE_FAIL"));
 					curSequence.reset();
 					playFailSound();
 				}
@@ -168,7 +246,7 @@ public class PadLogger extends Activity implements OnTouchListener {
 	private void playFailSound() {
 		
 		Random r = new Random();
-		sp.play(soundMap.get(4 + r.nextInt(2)), 1.0f, 1.0f, 100, 0, 1.0f);
+		sp.play(soundMap.get(4 + r.nextInt(1)), 1.0f, 1.0f, 100, 0, 1.0f);
 		
 	}
 	
@@ -182,6 +260,64 @@ public class PadLogger extends Activity implements OnTouchListener {
 	private void playChime() { 
 		
 		sp.play(soundMap.get(0), 1.0f, 1.0f, 100, 0, 1.0f);
+		
+	}
+
+	@Override
+	public void onAccuracyChanged(Sensor sensor, int accuracy) {}
+
+	@Override
+	public void onSensorChanged(SensorEvent event) {
+		
+		sensorBuilder.append(sensorMap.get(event.sensor.hashCode()) + "," + System.currentTimeMillis() + ",");
+		for (int i=0; i<6; i++) {
+			if (i < event.values.length) {
+				sensorBuilder.append(event.values[i]);
+			}
+			sensorBuilder.append(",");
+		}
+		//Log.d("LoggerService", "ZOMG PL0Z HALP MAI - 013");
+		sensorBuilder.deleteCharAt(sensorBuilder.length() - 1).append("\n"); //Remove trailing comma
+		
+	}
+	
+	private void createLogFile() {
+	
+		String deviceID = Globals.getDeviceID(this);
+		String logFileName = deviceID + "_" + System.currentTimeMillis();
+		String logFilePath = Globals.rootDataDirectory + File.separator + logFileName;
+		StringBuilder logContents = new StringBuilder();
+		List<Sensor> sensors = getAllSensors();
+		Sensor curSensor;
+		
+		logContents.append("[DEVICE_INFO]\n");
+		logContents.append("DEVICE_ID:" + deviceID + "\n");
+		logContents.append("DEVICE_MODEL:" + android.os.Build.MODEL);
+		logContents.append("[/DEVICE_INFO]\n[SENSOR_INFO]\n");
+		
+		for (int i=0; i<sensors.size(); i++) {
+			curSensor = sensors.get(i);
+			logContents.append(sensorMap.get(curSensor.hashCode()) + "," + curSensor.getName() + "," + curSensor.getType() + "," + curSensor.getVendor() + "," + curSensor.getResolution() + "\n");
+		}
+		
+		logContents.append("[/SENSOR_INFO]\n[SENSOR_READINGS]\n");
+		logContents.append(sensorBuilder.toString());
+		
+		logContents.append("[/SENSOR_READINGS]\n[APP_EVENTS]\n");
+		
+		for (int i=0; i<loggedEvents.size(); i++) {
+		
+			logContents.append(loggedEvents.get(i).getEventString() + "\n");
+			
+		}
+		
+		logContents.append("[/APP_EVENTS]");
+		
+		StorageHelper.writeStringToFile(logFilePath, logContents.toString());
+		PadLogger.filesToOffload.add(logFilePath);
+		
+		sensorBuilder = new StringBuilder();
+		loggedEvents = new ArrayList<BioEvent>();
 		
 	}
 	

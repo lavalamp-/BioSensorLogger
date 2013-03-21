@@ -1,16 +1,29 @@
 package com.moarcodeplz.biometriclogger;
 
-public class Globals {
+import java.io.File;
+import java.util.UUID;
 
-	public static final String[] SEQUENCES = {
-		"8675309",
-		"90210",
-		"7708400559",
-		"1234567890",
-		"0987654321"
-	};
+import android.content.Context;
+import android.os.Environment;
+import android.telephony.TelephonyManager;
+
+public class Globals {
 	
-	public static final String FIRST_SEQUENCE = "8675309";
-	public static final String SECOND_SEQUENCE = "90210";
+	public static final String rootDataDirectory = Environment.getExternalStorageDirectory().getAbsolutePath() + File.separator + "data" + File.separator + "BioSensorLogger" + File.separator;
+	public static final String nameFile = rootDataDirectory + File.separator + "name";
+	public static final String offloadUrl = "http://www.moarcodeplz.com/uploadData.php";
+	
+	public static String getDeviceID(Context inputContext) {
+		
+		TelephonyManager tm = (TelephonyManager) inputContext.getSystemService(Context.TELEPHONY_SERVICE);
+
+	    final String tmDevice, tmSerial, androidId;
+	    tmDevice = "" + tm.getDeviceId();
+	    tmSerial = "" + tm.getSimSerialNumber();
+	    androidId = "" + android.provider.Settings.Secure.getString(inputContext.getContentResolver(), android.provider.Settings.Secure.ANDROID_ID);
+
+	    return new UUID(androidId.hashCode(), ((long)tmDevice.hashCode() << 32) | tmSerial.hashCode()).toString();
+		
+	}
 	
 }
